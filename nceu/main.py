@@ -220,7 +220,7 @@ class NCDULikeInterface:
                     self.stdscr.addstr(i, 0, f"{date:<20} {email['subject'][:50]:<50}", mode)
 
         if self.view_mode == 'senders':
-            footer = "q: Quit | s: Change sort | Enter: View emails"
+            footer = "q: Quit | a: Arhive sender | s: Change sort | Enter: View emails"
         else:
             footer = "q: Back to senders | a: Archive | Enter: View email details"
         self.stdscr.addstr(height - 1, 0, footer, curses.A_REVERSE)
@@ -253,6 +253,8 @@ class NCDULikeInterface:
                     self.top_row = self.current_row - curses.LINES + 7
             elif key == ord('s') and self.view_mode == 'senders':
                 self.change_sort()
+            elif key == ord('a') and self.view_mode == 'senders':
+                self.archive_sender_emails()
             elif key == ord('a') and self.view_mode == 'emails':
                 self.archive_email()
             elif key == 10:
@@ -266,6 +268,7 @@ class NCDULikeInterface:
                 else:
                     self.show_email_details()
 
+
     def change_sort(self):
         if self.sort_by == 'count':
             self.sort_reverse = not self.sort_reverse
@@ -273,6 +276,48 @@ class NCDULikeInterface:
             self.sort_by = 'count'
             self.sort_reverse = True
         self.sort_emails()
+
+    def archive_sender_emails(self):
+        if self.view_mode == 'senders':
+            sender_data = self.grouped_emails[self.current_row]
+            total_emails = len(sender_data['emails'])
+            archived_count = 0
+            try:
+                for email in sender_data['emails']:
+                    self.service.users().messages().modify(
+                        userId='me',
+                        id=email['id'],
+                        body={'removeLabelIds': ['INBOX']}
+                    ).execute()
+
+                    archived_count += 1
+                    self.show_archiving_progress(archived_count, total_emails, sender_data['sender_full'])
+
+                sender_email = sender_data['sender_email']
+                self.grouped_emails = [group for group in self.grouped_emails if group['sender_email'] != sender_email]
+
+                self.current_row = min(self.current_row, len(self.grouped_emails) - 1)
+                self.top_row = max(0, self.current_row - curses.LINES + 6)
+                
+                self.show_message(f"All emails from {sender_data['sender_full']} archived successfully")
+            except Exception as e:
+                self.show_message(f"Error archiving emails: {str(e)}")
+
+    def show_archiving_progress(self, archived_count, total_emails, sender_full):
+        height, width = self.stdscr.getmaxyx()
+        self.stdscr.clear()
+
+        header = f"Archiving emails from {sender_full}"
+        self.stdscr.addstr(0, (width - len(header)) // 2, header, curses.A_BOLD)
+        
+        progress_message = f"Archived {archived_count} of {total_emails} emails"
+        self.stdscr.addstr(height // 2, (width - len(progress_message)) // 2, progress_message)
+
+        progress_bar_length = 40
+        progress = int((archived_count / total_emails) * progress_bar_length)
+        self.stdscr.addstr(height // 2 + 2, (width - progress_bar_length) // 2, f"[{'=' * progress}{' ' * (progress_bar_length - progress)}]")
+        
+        self.stdscr.refresh()
 
     def archive_email(self):
         if self.view_mode == 'emails':
