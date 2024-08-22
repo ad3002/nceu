@@ -9,7 +9,8 @@ NCeu is a command-line interface tool for managing and analyzing your Gmail inbo
 - Group emails by sender
 - Sort emails by count or date
 - View email details
-- Archive emails directly from the interface
+- Archive individual emails or all emails from a sender directly from the interface
+- Progress bar for archiving multiple emails
 - ncurses-based UI for smooth navigation
 
 ## Prerequisites
@@ -75,6 +76,7 @@ On first run, you'll be prompted to authorize the application. Follow the provid
 - Press 'Enter' to view emails from a sender or email details
 - Press 's' to change sort order (in sender view)
 - Press 'a' to archive an email (in email view)
+- Press 'a' to archive all emails from a sender (in sender view) with a progress bar showing the status
 - Press 'q' to go back or quit the application
 
 ## Contributing
