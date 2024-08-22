@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="nceu",
-    version="0.1.0",
+    version="0.2.2",
     author="Aleksey Komissarov",
     author_email="ad3002@gmail.com",
     description="A ncurses-based Gmail inbox analyzer and manager",

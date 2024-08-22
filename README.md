@@ -19,15 +19,25 @@ NCeu is a command-line interface tool for managing and analyzing your Gmail inbo
 
 ## Installation
 
+You can install NCeu using pip:
+
+```
+pip install nceu
+```
+
+This will install NCeu as a system-wide application.
+
+If you want to install it from source:
+
 1. Clone this repository:
    ```
    git clone https://github.com/ad3002/nceu.git
    cd nceu
    ```
 
-2. Install the required packages:
+2. Install the package:
    ```
-   pip install google-auth-oauthlib google-auth-httplib2 google-api-python-client python-dateutil
+   pip install .
    ```
 
 3. Set up Google Cloud Project and enable Gmail API:
@@ -35,7 +45,7 @@ NCeu is a command-line interface tool for managing and analyzing your Gmail inbo
    - Create a new project
    - Enable the Gmail API for your project
    - Create credentials (OAuth client ID) for a desktop application
-   - Download the client configuration and save it as `credentials.json` in the project directory
+   - Download the client configuration and save it as `credentials.json` in your working directory
 
 ## Setting Up a Test User
 
@@ -51,10 +61,10 @@ This approach allows you to safely test all features without risking your primar
 
 ## Usage
 
-Run the script:
+After installation, you can run NCeu from anywhere in your system by simply typing:
 
 ```
-python nceu.py
+nceu
 ```
 
 On first run, you'll be prompted to authorize the application. Follow the provided URL to grant necessary permissions. Use your test account credentials for this step.

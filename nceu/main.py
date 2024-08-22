@@ -3,6 +3,7 @@ import curses
 from curses import wrapper
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 import time
 from typing import List, Dict
 from collections import defaultdict
@@ -10,14 +11,26 @@ from datetime import datetime
 import dateutil.parser
 import re
 from google_auth_oauthlib.flow import InstalledAppFlow
-
+import sys
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
 def authenticate_gmail():
     creds = None
     if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        except Exception as error:
+            print(f"An error occurred while reading token: {error}")
+            os.remove('token.json')
+            print("Token file removed. Please restart the program.")
+            sys.exit(1)
+    if not os.path.exists('credentials.json'):
+        print("Please download credentials.json from the Google Cloud Console and save it to the current directory.")
+        print("Instructions: https://developers.google.com/gmail/api/quickstart/python")
+        print("See our github page for more information: https://github.com/ad3002/nceu")
+        sys.exit(1)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -298,7 +311,7 @@ class NCDULikeInterface:
         self.stdscr.refresh()
         self.stdscr.getch()
 
-def main(stdscr):
+def inner_main(stdscr, creds):
     curses.use_default_colors()
     curses.curs_set(0)
     stdscr.timeout(100) 
@@ -308,7 +321,7 @@ def main(stdscr):
     curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
     stdscr.bkgd(' ', curses.color_pair(1))
 
-    creds = authenticate_gmail()
+    
     service = build('gmail', 'v1', credentials=creds)
 
     emails = download_emails(stdscr, service)
@@ -316,5 +329,9 @@ def main(stdscr):
     interface = NCDULikeInterface(stdscr, emails, service)
     interface.run()
 
+def main():
+    creds = authenticate_gmail()
+    wrapper(inner_main, creds)
+
 if __name__ == '__main__':
-    wrapper(main)
+    main()
