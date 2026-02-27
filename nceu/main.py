@@ -5,6 +5,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 import httplib2
+import google_auth_httplib2
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -427,8 +428,8 @@ def inner_main(stdscr, creds):
     stdscr.bkgd(' ', curses.color_pair(1))
 
     
-    http = httplib2.Http(timeout=API_TIMEOUT)
-    service = build('gmail', 'v1', credentials=creds, http=http)
+    http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=API_TIMEOUT))
+    service = build('gmail', 'v1', http=http)
 
     emails = download_emails(stdscr, service)
     
