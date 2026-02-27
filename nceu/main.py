@@ -69,6 +69,9 @@ def extract_email(sender):
         return match.group(1)
     return sender
 
+def clean_subject(subject):
+    return re.sub(r'^(Re|Fwd|Fw)\s*:\s*', '', subject, flags=re.IGNORECASE).strip()
+
 
 def download_emails(stdscr, service):
     height, width = stdscr.getmaxyx()
@@ -123,6 +126,7 @@ def download_emails(stdscr, service):
 
                 emails_data.append({
                     'id': message['id'],
+                    'threadId': msg.get('threadId', message['id']),
                     'subject': subject,
                     'sender': sender,
                     'size': size,
@@ -150,7 +154,8 @@ class NCDULikeInterface:
     def __init__(self, stdscr, emails, service):
         self.stdscr = stdscr
         self.emails = emails
-        self.service = service 
+        self.service = service
+        self.group_mode = 'sender'
         self.grouped_emails = self.group_emails()
         self.current_row = 0
         self.top_row = 0
@@ -158,18 +163,41 @@ class NCDULikeInterface:
         self.sort_reverse = True
         self.view_mode = 'senders'
         self.selected_sender = None
-        self.sender_position = 0 
+        self.sender_position = 0
         self.sort_emails()
         self.last_height = 0
         self.last_width = 0
 
     def group_emails(self):
+        if self.group_mode == 'thread':
+            return self._group_by_thread()
+        return self._group_by_sender()
+
+    def _group_by_sender(self):
         grouped = defaultdict(list)
         for email in self.emails:
             sender_email = extract_email(email['sender'])
             grouped[sender_email].append(email)
-        return [{'sender_email': sender_email, 'sender_full': emails[0]['sender'], 'count': len(emails), 'emails': emails} 
+        return [{'sender_email': sender_email, 'sender_full': emails[0]['sender'], 'count': len(emails), 'emails': emails}
                 for sender_email, emails in grouped.items()]
+
+    def _group_by_thread(self):
+        grouped = defaultdict(list)
+        for email in self.emails:
+            grouped[email['threadId']].append(email)
+        result = []
+        for thread_id, emails in grouped.items():
+            sorted_emails = sorted(emails, key=lambda x: parse_date(x['date']), reverse=True)
+            subject = clean_subject(sorted_emails[0]['subject'])
+            senders = list({extract_email(e['sender']) for e in sorted_emails})
+            result.append({
+                'sender_email': thread_id,
+                'sender_full': subject,
+                'count': len(sorted_emails),
+                'emails': sorted_emails,
+                'senders': senders,
+            })
+        return result
 
     def sort_emails(self):
         if self.view_mode == 'senders':
@@ -193,16 +221,22 @@ class NCDULikeInterface:
         else:
             self.stdscr.erase()
 
-        header = "Inbox Email Manager (grouped by sender email)"
+        if self.group_mode == 'thread':
+            header = "Inbox Email Manager (grouped by thread)"
+        else:
+            header = "Inbox Email Manager (grouped by sender email)"
         self.stdscr.addstr(0, (width - len(header)) // 2, header, curses.A_REVERSE)
 
         sort_info = f"Sorted by {self.sort_by} ({'desc' if self.sort_reverse else 'asc'})"
         self.stdscr.addstr(1, (width - len(sort_info)) // 2, sort_info)
 
         if self.view_mode == 'senders':
-            self.stdscr.addstr(3, 0, f"{'Count':>10} {'Sender':<60}")
+            if self.group_mode == 'thread':
+                self.stdscr.addstr(3, 0, f"{'Count':>10} {'Subject':<60}")
+            else:
+                self.stdscr.addstr(3, 0, f"{'Count':>10} {'Sender':<60}")
         else:
-            self.stdscr.addstr(3, 0, f"{'Date':<20} {'Subject':<50}")
+            self.stdscr.addstr(3, 0, f"{'Date':<20} {'From':<30} {'Subject':<40}")
         self.stdscr.addstr(4, 0, "-" * (width - 1))
 
         for i in range(5, height - 1):
@@ -224,12 +258,14 @@ class NCDULikeInterface:
                     else:
                         mode = curses.A_NORMAL
                     date = parse_date(email['date']).strftime('%Y-%m-%d %H:%M')
-                    self.stdscr.addstr(i, 0, f"{date:<20} {email['subject'][:50]:<50}", mode)
+                    sender_short = extract_email(email['sender'])[:30]
+                    self.stdscr.addstr(i, 0, f"{date:<20} {sender_short:<30} {email['subject'][:40]:<40}", mode)
 
         if self.view_mode == 'senders':
-            footer = "q: Quit | a: Arhive sender | s: Change sort | Enter: View emails"
+            mode_label = "threads" if self.group_mode == 'sender' else "senders"
+            footer = f"q: Quit | a: Archive | s: Sort | t: Group by {mode_label} | Enter: View"
         else:
-            footer = "q: Back to senders | a: Archive | Enter: View email details"
+            footer = "q: Back | a: Archive | Enter: View email details"
         self.stdscr.addstr(height - 1, 0, footer, curses.A_REVERSE)
 
         self.stdscr.refresh()
@@ -258,6 +294,8 @@ class NCDULikeInterface:
                     self.current_row += 1
                 if self.current_row >= self.top_row + curses.LINES - 6:
                     self.top_row = self.current_row - curses.LINES + 7
+            elif key == ord('t') and self.view_mode == 'senders':
+                self.toggle_group_mode()
             elif key == ord('s') and self.view_mode == 'senders':
                 self.change_sort()
             elif key == ord('a') and self.view_mode == 'senders':
@@ -275,6 +313,13 @@ class NCDULikeInterface:
                 else:
                     self.show_email_details()
 
+
+    def toggle_group_mode(self):
+        self.group_mode = 'thread' if self.group_mode == 'sender' else 'sender'
+        self.grouped_emails = self.group_emails()
+        self.current_row = 0
+        self.top_row = 0
+        self.sort_emails()
 
     def change_sort(self):
         if self.sort_by == 'count':
