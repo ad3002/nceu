@@ -4,14 +4,17 @@ from curses import wrapper
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+import httplib2
 import time
-from typing import List, Dict
 from collections import defaultdict
 from datetime import datetime
 import dateutil.parser
 import re
 from google_auth_oauthlib.flow import InstalledAppFlow
 import sys
+
+API_TIMEOUT = 120
+API_RETRIES = 3
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
@@ -56,12 +59,17 @@ def parse_date(date_string):
         return datetime.min
     
 def get_total_emails(service, query):
-    try:
-        result = service.users().labels().get(userId='me', id='INBOX').execute()
-        return result['messagesTotal']
-    except Exception as error:
-        print(f"An error occurred while getting total emails: {error}")
-        return 0
+    for attempt in range(API_RETRIES):
+        try:
+            result = service.users().labels().get(userId='me', id='INBOX').execute(num_retries=API_RETRIES)
+            return result['messagesTotal']
+        except Exception as error:
+            if attempt < API_RETRIES - 1:
+                print(f"Attempt {attempt + 1} failed: {error}. Retrying...")
+                time.sleep(2 ** attempt)
+            else:
+                print(f"Failed to get total emails after {API_RETRIES} attempts: {error}")
+                return 0
     
 def extract_email(sender):
     match = re.search(r'<(.+?)>', sender)
@@ -108,11 +116,11 @@ def download_emails(stdscr, service):
     try:
         next_page_token = None
         while True:
-            results = service.users().messages().list(userId='me', pageToken=next_page_token, maxResults=100, q='in:inbox').execute()
+            results = service.users().messages().list(userId='me', pageToken=next_page_token, maxResults=100, q='in:inbox').execute(num_retries=API_RETRIES)
             messages = results.get('messages', [])
 
             for message in messages:
-                msg = service.users().messages().get(userId='me', id=message['id'], format='metadata').execute()
+                msg = service.users().messages().get(userId='me', id=message['id'], format='metadata').execute(num_retries=API_RETRIES)
                 
                 headers = msg['payload']['headers']
                 subject = next((header['value'] for header in headers if header['name'] == 'Subject'), 'No Subject')
@@ -340,7 +348,7 @@ class NCDULikeInterface:
                         userId='me',
                         id=email['id'],
                         body={'removeLabelIds': ['INBOX']}
-                    ).execute()
+                    ).execute(num_retries=API_RETRIES)
 
                     archived_count += 1
                     self.show_archiving_progress(archived_count, total_emails, sender_data['sender_full'])
@@ -379,7 +387,7 @@ class NCDULikeInterface:
                     userId='me',
                     id=email['id'],
                     body={'removeLabelIds': ['INBOX']}
-                ).execute()
+                ).execute(num_retries=API_RETRIES)
                 
                 del self.selected_sender['emails'][self.current_row]
                 self.selected_sender['count'] -= 1
@@ -419,7 +427,8 @@ def inner_main(stdscr, creds):
     stdscr.bkgd(' ', curses.color_pair(1))
 
     
-    service = build('gmail', 'v1', credentials=creds)
+    http = httplib2.Http(timeout=API_TIMEOUT)
+    service = build('gmail', 'v1', credentials=creds, http=http)
 
     emails = download_emails(stdscr, service)
     
