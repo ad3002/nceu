@@ -11,28 +11,38 @@ import pytest
 
 
 KEYS = [
-    ('\x1b[B', 0.1),   # down
-    ('a', 0.1),        # queue sender
-    ('a', 0.1),        # queue next sender (cursor moved on its own)
-    ('a', 0.1),        # and the next one
-    ('v', 0.3),        # open the queue view
-    ('\x1b[B', 0.1),   # move inside the queue
-    ('d', 0.2),        # drop that task
-    ('p', 0.2),        # stop the queue
-    ('p', 0.2),        # start it again
+    ('p', 0.2),        # stop the queue so the tasks pile up deterministically
+    ('a', 0.2),        # queue a sender (the cursor moves down on its own)
+    ('a', 0.2),        # queue the next one
+    ('a', 0.2),        # and the next one
+    ('v', 0.4),        # open the queue view
+    ('d', 0.3),        # drop the selected task
+    ('p', 0.2),        # start the queue again from inside the view
+    ('p', 0.2),        # and stop it again
     ('q', 0.3),        # back to the list
-    ('t', 0.2),        # regroup by thread
-    ('t', 0.2),        # and back
-    ('u', 0.2),        # undo on the current row
-    ('\n', 0.3),       # open a sender
+    ('t', 0.3),        # group by thread
+    ('c', 0.8),        # read the whole conversation of the current thread
+    ('h', 0.3),        # unfold the quoted history
+    ('h', 0.3),        # fold it back
+    (' ', 0.2),        # page down through the conversation
+    ('b', 0.2),        # page back up
+    ('q', 0.3),        # leave the conversation
+    ('t', 0.3),        # back to grouping by sender
+    ('\n', 0.4),       # open a sender
     ('a', 0.2),        # queue a single email
-    ('u', 0.2),        # undo it
-    ('\n', 0.3),       # email details
-    (' ', 0.3),        # leave details
-    ('q', 0.3),        # back to senders
-    ('s', 0.2),        # change sort
-    ('q', 0.5),        # quit -> confirmation while the queue is busy
-    ('w', 3.0),        # wait for the queue to drain
+    ('u', 0.2),        # take it back out of the queue
+    ('\n', 0.8),       # open the message reader (loads the body)
+    (' ', 0.2),        # page down through the body
+    ('b', 0.2),        # page back up
+    ('r', 0.5),        # reload the body
+    ('c', 0.8),        # jump from the message to its whole thread
+    ('q', 0.3),        # back to the message
+    ('q', 0.3),        # back to the email list
+    ('q', 0.3),        # back to the senders
+    ('s', 0.2),        # change sort order
+    ('p', 3.0),        # start the queue and let it drain
+    ('q', 0.8),        # quit
+    ('w', 3.0),        # if the queue is still busy: wait for it
 ]
 
 
@@ -81,3 +91,14 @@ def test_curses_ui_survives_a_full_key_run(tmp_path):
     assert 'errors=0' in report
     archived = int(report.split('archived=')[1].split()[0])
     assert archived > 0, "the queue exited without archiving anything"
+    bodies = int(report.split('bodies=')[1].split()[0])
+    assert bodies >= 2, "opening a message must fetch its body, and 'r' must fetch it again"
+    threads = int(report.split('threads=')[1].split()[0])
+    assert threads >= 2, "the conversation must be fetched from the thread list and from a message"
+
+    trace = report.split('trace=')[1].strip().split(',')
+    assert 'queue-view' in trace, "the queue view was never reached"
+    assert 'reader:emails' in trace, "the message reader was never reached"
+    assert 'thread:senders' in trace, "'c' on a thread row did not open the conversation"
+    assert 'thread:emails' in trace, "'c' inside a message did not open the conversation"
+    assert trace.count('enqueue:senders') >= 3

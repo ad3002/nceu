@@ -15,6 +15,10 @@ NCeu is a command-line interface tool for managing and analyzing your Gmail inbo
 - 5 second undo window: a queued task is only sent to Gmail after a short delay, so a mistaken 'a' can
   still be taken back
 - Queue inspector with live countdown, per-task removal, and a stop/start switch
+- Read a message right in the terminal: full body (plain text, or HTML converted to text),
+  headers, attachment list, scrolling
+- Read a whole conversation: every message of the thread in order, including the ones you sent,
+  with the quoted history folded away
 - Failed tasks are shown in the interface (status line, row marker, queue view) and repeated on exit -
   they are never silently dropped
 - ncurses-based UI for smooth navigation
@@ -86,7 +90,32 @@ On first run, you'll be prompted to authorize the application. Follow the provid
   email in email view. The cursor moves down straight away, so 'a a a a' queues four rows.
 - Press 'u' to take the current row back out of the queue
 - Press 'v' to open the queue, 'p' to stop or restart it
+- Press 'c' to read the whole conversation of the current row
 - Press 'q' to go back or quit the application
+
+### Reading messages
+
+'Enter' on an email opens it: subject, from/to, date, attachments and the full body, fetched from
+Gmail on demand (the inbox scan itself only downloads metadata, so it stays fast). A message with no
+plain text part is converted from HTML; if there is no text at all, the Gmail snippet is shown, and
+both cases are labelled. If the body cannot be loaded, the reader says why instead of looking empty -
+'r' tries again.
+
+Scrolling: arrows, PgUp/PgDn, space and 'b', Home/End. 'a' queues the message for archiving and
+returns to the list, 'c' opens the whole conversation, 'q' goes back.
+
+### Reading conversations
+
+'c' opens the entire thread: every message in order, numbered `1/4`, `2/4`, ..., each with its own
+headers and body. Messages you sent are marked `[sent]`, messages that already left the inbox are
+marked `[archived]`, and the message you came from is marked with `>>`.
+
+The quoted history at the end of a reply is folded to a `[N quoted lines hidden]` line so a long
+chain stays readable - 'h' unfolds it. 'a' queues every inbox message of the conversation for
+archiving, 'r' reloads it, 'q' goes back.
+
+Threads are also a grouping mode: 't' in the list view groups the inbox by conversation instead of by
+sender, so 'c' on a row reads that conversation and 'a' archives it as a whole.
 
 ### Archive queue
 
@@ -112,7 +141,9 @@ python3 -m pytest tests/
 ```
 
 The suite drives the real queue worker against a fake Gmail service (delay, cancellation, stop/start,
-partial failures) and runs the real ncurses interface inside a pty.
+partial failures), checks body and thread parsing (multipart, HTML, charsets, quoted tails, load
+errors), and runs the real ncurses interface inside a pty, asserting that the queue view, the message
+reader and the conversation reader were actually reached.
 
 ## Contributing
 

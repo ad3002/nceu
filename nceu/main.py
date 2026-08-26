@@ -1,6 +1,9 @@
+import base64
 import os
 import curses
+import textwrap
 from curses import wrapper
+from html import unescape
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
@@ -177,6 +180,296 @@ def download_emails(stdscr, service):
 
     stdscr.nodelay(False)
     return emails_data
+
+
+def decode_base64url(data):
+    padding = '=' * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
+
+
+def part_charset(part):
+    for header in part.get('headers', []) or []:
+        if header.get('name', '').lower() == 'content-type':
+            match = re.search(r'charset="?([\w\-]+)"?', header.get('value', ''), re.IGNORECASE)
+            if match:
+                return match.group(1)
+    return 'utf-8'
+
+
+def decode_part_text(part):
+    raw = decode_base64url(part.get('body', {}).get('data', ''))
+    charset = part_charset(part)
+    try:
+        return raw.decode(charset, 'replace')
+    except LookupError:
+        return raw.decode('utf-8', 'replace')
+
+
+def html_to_text(markup):
+    text = re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', '', markup)
+    text = re.sub(r'(?i)<br\s*/?>', '\n', text)
+    text = re.sub(r'(?i)<li[^>]*>', '- ', text)
+    text = re.sub(r'(?i)</(p|div|tr|li|h[1-6]|table|blockquote)>', '\n', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = unescape(text)
+    text = re.sub(r'[ \t\xa0]+', ' ', text)
+    text = re.sub(r'\n[ \t]+', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def extract_message_body(payload):
+    """Returns (text, kind) with kind in 'plain' | 'html' | None. Plain text wins."""
+    plain = []
+    html = []
+
+    def walk(part):
+        sub_parts = part.get('parts')
+        if sub_parts:
+            for sub_part in sub_parts:
+                walk(sub_part)
+            return
+        if part.get('filename'):
+            return
+        if not part.get('body', {}).get('data'):
+            return
+        mime = part.get('mimeType', '')
+        if mime == 'text/plain':
+            plain.append(decode_part_text(part))
+        elif mime == 'text/html':
+            html.append(decode_part_text(part))
+
+    walk(payload)
+    if any(chunk.strip() for chunk in plain):
+        return '\n'.join(plain), 'plain'
+    if any(chunk.strip() for chunk in html):
+        return html_to_text('\n'.join(html)), 'html'
+    return '', None
+
+
+def list_attachments(payload):
+    found = []
+
+    def walk(part):
+        for sub_part in part.get('parts', []) or []:
+            walk(sub_part)
+        filename = part.get('filename')
+        if filename:
+            found.append((filename, part.get('body', {}).get('size', 0)))
+
+    walk(payload)
+    return found
+
+
+def fetch_email_body(service, email):
+    """Loads the full message into the email dict.
+
+    A failure is stored in 'body_error' and rendered by the reader, so a
+    message that cannot be read never looks like an empty message.
+    """
+    try:
+        message = service.users().messages().get(
+            userId='me', id=email['id'], format='full'
+        ).execute(num_retries=API_RETRIES)
+    except Exception as error:
+        email['body'] = None
+        email['body_error'] = str(error)
+        return email
+
+    payload = message.get('payload', {}) or {}
+    headers = {header.get('name', '').lower(): header.get('value', '')
+               for header in payload.get('headers', []) or []}
+    email['to'] = headers.get('to', '')
+    email['cc'] = headers.get('cc', '')
+    text, kind = extract_message_body(payload)
+    if not text.strip():
+        snippet = message.get('snippet', '')
+        text, kind = (unescape(snippet), 'snippet') if snippet.strip() else ('', None)
+    email['body'] = text
+    email['body_kind'] = kind
+    email['body_error'] = None
+    email['attachments'] = list_attachments(payload)
+    return email
+
+
+def append_wrapped(lines, text, width, is_header=False):
+    if not text:
+        lines.append(("", False))
+        return
+    for chunk in textwrap.wrap(text, width) or ['']:
+        lines.append((chunk, is_header))
+
+
+BODY_KIND_NOTES = {
+    'html': '[no plain text part - converted from HTML]',
+    'snippet': '[no text part - showing the Gmail snippet]',
+}
+
+
+def build_reader_lines(email, width):
+    """Renders one email as (text, is_header) lines wrapped to width."""
+    width = max(20, width)
+    lines = []
+
+    def header(label, value):
+        if not value:
+            return
+        for chunk in textwrap.wrap(f"{label}: {value}", width) or [f"{label}:"]:
+            lines.append((chunk, True))
+
+    header('Subject', email.get('subject'))
+    header('From', email.get('sender'))
+    header('To', email.get('to'))
+    header('Cc', email.get('cc'))
+    header('Date', email.get('date'))
+    if email.get('state'):
+        header('Queue', email['state'])
+    for name, size in email.get('attachments') or []:
+        header('Attachment', f"{name} ({size / 1024:.1f} KiB)")
+    lines.append(('-' * width, False))
+
+    if email.get('body_error'):
+        append_wrapped(lines, f"! Could not load this message: {email['body_error']}", width, True)
+        append_wrapped(lines, "Press r to try again.", width)
+        return lines
+
+    body = email.get('body')
+    if body is None:
+        lines.append(("Loading...", False))
+        return lines
+
+    note = BODY_KIND_NOTES.get(email.get('body_kind'))
+    if note:
+        append_wrapped(lines, note, width)
+        lines.append(("", False))
+    if not body.strip():
+        append_wrapped(lines, "(this message has no readable text)", width)
+        return lines
+
+    for raw_line in body.expandtabs(4).splitlines():
+        if not raw_line.strip():
+            lines.append(("", False))
+            continue
+        for chunk in textwrap.wrap(raw_line, width) or ['']:
+            lines.append((chunk, False))
+    return lines
+
+
+QUOTED_LINE = re.compile(r'^\s*(>|\|)')
+ATTRIBUTION_LINE = re.compile(
+    r'(?is)^\s*(on\s.+wrote:|.*\b(wrote|написал\(а\)|написал|писал|schrieb|escribió|a écrit)\s*:)\s*$')
+
+
+def split_quoted_tail(text):
+    """Splits off the quoted history at the end of a reply.
+
+    Returns (visible_text, hidden_line_count). Nothing is thrown away - the
+    reader can always show the full text again.
+    """
+    lines = text.splitlines()
+    index = len(lines) - 1
+    while index >= 0 and (not lines[index].strip() or QUOTED_LINE.match(lines[index])):
+        index -= 1
+    cut = index + 1
+    if cut >= len(lines):
+        return text, 0
+    if cut > 0 and ATTRIBUTION_LINE.match(lines[cut - 1]):
+        cut -= 1
+    hidden = len(lines) - cut
+    if hidden < 3:
+        return text, 0
+    return '\n'.join(lines[:cut]).rstrip(), hidden
+
+
+def message_from_payload(message):
+    payload = message.get('payload', {}) or {}
+    headers = {header.get('name', '').lower(): header.get('value', '')
+               for header in payload.get('headers', []) or []}
+    text, kind = extract_message_body(payload)
+    if not text.strip():
+        snippet = message.get('snippet', '')
+        text, kind = (unescape(snippet), 'snippet') if snippet.strip() else ('', None)
+    return {
+        'id': message.get('id'),
+        'sender': headers.get('from', 'Unknown'),
+        'to': headers.get('to', ''),
+        'cc': headers.get('cc', ''),
+        'date': headers.get('date', ''),
+        'subject': headers.get('subject', ''),
+        'labels': message.get('labelIds', []) or [],
+        'body': text,
+        'kind': kind,
+        'attachments': list_attachments(payload),
+    }
+
+
+def fetch_thread(service, thread_id):
+    """Returns (messages, error). The error is rendered, never swallowed."""
+    try:
+        thread = service.users().threads().get(
+            userId='me', id=thread_id, format='full'
+        ).execute(num_retries=API_RETRIES)
+    except Exception as error:
+        return None, str(error)
+    messages = [message_from_payload(message) for message in thread.get('messages', []) or []]
+    return messages, None
+
+
+def build_thread_lines(messages, width, show_quotes=False, error=None, focus_id=None):
+    """Renders a whole conversation as (text, is_header) lines."""
+    width = max(20, width)
+    lines = []
+
+    if error:
+        append_wrapped(lines, f"! Could not load this conversation: {error}", width, True)
+        append_wrapped(lines, "Press r to try again.", width)
+        return lines
+    if messages is None:
+        append_wrapped(lines, "Loading conversation...", width)
+        return lines
+    if not messages:
+        append_wrapped(lines, "(this conversation has no messages)", width)
+        return lines
+
+    for number, message in enumerate(messages, 1):
+        if number > 1:
+            lines.append(("", False))
+        marker = '>' if message.get('id') == focus_id else '-'
+        title = f"{marker}{marker} {number}/{len(messages)} "
+        labels = message.get('labels', [])
+        if 'SENT' in labels:
+            title += "[sent] "
+        elif 'INBOX' not in labels:
+            title += "[archived] "
+        lines.append(((title + '-' * max(0, width - len(title)))[:width], True))
+        for label, key in (('From', 'sender'), ('To', 'to'), ('Cc', 'cc'),
+                           ('Date', 'date'), ('Subject', 'subject')):
+            value = message.get(key)
+            if not value:
+                continue
+            for chunk in textwrap.wrap(f"{label}: {value}", width):
+                lines.append((chunk, True))
+        for name, size in message.get('attachments') or []:
+            append_wrapped(lines, f"Attachment: {name} ({size / 1024:.1f} KiB)", width, True)
+        lines.append(("", False))
+
+        note = BODY_KIND_NOTES.get(message.get('kind'))
+        if note:
+            append_wrapped(lines, note, width)
+        body = message.get('body') or ''
+        if not body.strip():
+            append_wrapped(lines, "(no readable text)", width)
+            continue
+        visible, hidden = (body, 0) if show_quotes else split_quoted_tail(body)
+        for raw_line in visible.expandtabs(4).splitlines():
+            if not raw_line.strip():
+                lines.append(("", False))
+                continue
+            for chunk in textwrap.wrap(raw_line, width) or ['']:
+                lines.append((chunk, False))
+        if hidden:
+            append_wrapped(lines, f"[{hidden} quoted lines hidden - press h to show]", width)
+    return lines
 
 
 class ArchiveTask:
@@ -365,6 +658,7 @@ class NCDULikeInterface:
         self.last_width = 0
         self.message = ""
         self.message_until = 0.0
+        self.thread_cache = {}
 
     def group_emails(self):
         if self.group_mode == 'thread':
@@ -549,9 +843,11 @@ class NCDULikeInterface:
 
         if self.view_mode == 'senders':
             mode_label = "threads" if self.group_mode == 'sender' else "senders"
-            footer = f"q: Quit | a: Queue | u: Unqueue | v: Queue view | p: Stop/Start | s: Sort | t: By {mode_label} | Enter: Open"
+            footer = (f"q: Quit | a: Queue | u: Unqueue | c: Thread | v: Queue view | "
+                      f"p: Stop/Start | s: Sort | t: By {mode_label} | Enter: Open")
         else:
-            footer = "q: Back | a: Queue | u: Unqueue | v: Queue view | p: Stop/Start | Enter: Details"
+            footer = ("q: Back | a: Queue | u: Unqueue | c: Thread | v: Queue view | "
+                      "p: Stop/Start | Enter: Read")
         self.addstr_safe(height - 1, 0, footer.ljust(width - 1), curses.A_REVERSE)
 
         self.stdscr.refresh()
@@ -590,6 +886,8 @@ class NCDULikeInterface:
                 self.enqueue_current()
             elif key == ord('u'):
                 self.unqueue_current()
+            elif key == ord('c'):
+                self.show_current_thread()
             elif key == ord('v'):
                 self.show_queue()
             elif key == ord('p'):
@@ -624,34 +922,33 @@ class NCDULikeInterface:
             self.sort_reverse = True
         self.sort_emails()
 
+    def enqueue_emails(self, emails, label, owner=None):
+        """Queues whatever is not queued or archived yet. Returns the task or None."""
+        targets = [email for email in emails
+                   if email.get('state') not in (STATE_QUEUED, STATE_RUNNING, STATE_ARCHIVED)]
+        if not targets:
+            self.show_message("Already queued or archived")
+            return None
+        task = ArchiveTask(label, targets, owner=owner)
+        if owner is not None:
+            owner['task'] = task
+        for email in targets:
+            email['task'] = task
+            email['state'] = STATE_QUEUED
+        self.queue.enqueue(task)
+        self.show_message(f"Queued {len(targets)} email(s) - {ARCHIVE_DELAY}s to undo with 'u'", 1.5)
+        return task
+
     def enqueue_current(self):
         """Add the current row to the background queue and move on immediately."""
         if self.row_count() == 0:
             return
         if self.view_mode == 'senders':
             group = self.grouped_emails[self.current_row]
-            targets = [email for email in group['emails']
-                       if email.get('state') not in (STATE_QUEUED, STATE_RUNNING, STATE_ARCHIVED)]
-            if not targets:
-                self.show_message("Already queued or archived")
-                self.move_down()
-                return
-            task = ArchiveTask(group['sender_full'], targets, owner=group)
-            group['task'] = task
+            self.enqueue_emails(group['emails'], group['sender_full'], owner=group)
         else:
             email = self.selected_sender['emails'][self.current_row]
-            if email.get('state') in (STATE_QUEUED, STATE_RUNNING, STATE_ARCHIVED):
-                self.show_message("Already queued or archived")
-                self.move_down()
-                return
-            targets = [email]
-            task = ArchiveTask(email['subject'][:40] or 'No Subject', targets)
-
-        for email in targets:
-            email['task'] = task
-            email['state'] = STATE_QUEUED
-        self.queue.enqueue(task)
-        self.show_message(f"Queued {len(targets)} email(s) - {ARCHIVE_DELAY}s to undo with 'u'", 1.5)
+            self.enqueue_emails([email], email['subject'][:40] or 'No Subject')
         self.move_down()
 
     def current_tasks(self):
@@ -832,22 +1129,163 @@ class NCDULikeInterface:
             self.stdscr.timeout(200)
         return True
 
+    def show_loading(self, text):
+        height, width = self.stdscr.getmaxyx()
+        self.stdscr.erase()
+        self.addstr_safe(height // 2, max(0, (width - len(text)) // 2), text, curses.A_BOLD)
+        self.stdscr.refresh()
+
+    def load_body(self, email):
+        self.show_loading(f"Loading message: {email['subject'][:40]}")
+        fetch_email_body(self.service, email)
+
+    def scroll_view(self, get_lines, footer_hint, extra_keys=None):
+        """Generic pager. get_lines(width) -> [(text, is_header)].
+
+        extra_keys maps a key code to a callback returning 'break', 'reload',
+        'top' or None.
+        """
+        extra_keys = extra_keys or {}
+        offset = 0
+        lines = []
+        last_width = None
+        stale = True
+        while True:
+            height, width = self.stdscr.getmaxyx()
+            if stale or width != last_width:
+                lines = get_lines(width - 1)
+                last_width, stale = width, False
+            page = max(1, height - 2)
+            offset = max(0, min(offset, max(0, len(lines) - page)))
+
+            self.stdscr.erase()
+            for row in range(page):
+                index = offset + row
+                if index >= len(lines):
+                    break
+                text, is_header = lines[index]
+                self.addstr_safe(row, 0, text, curses.A_BOLD if is_header else curses.A_NORMAL)
+
+            if self.message and time.time() < self.message_until:
+                self.addstr_safe(height - 2, 0, self.message.center(width - 1), curses.A_BOLD)
+
+            shown = min(len(lines), offset + page)
+            percent = 100 if len(lines) <= page else int(shown * 100 / len(lines))
+            footer = f"{footer_hint}   [{percent}%  {shown}/{len(lines)}]"
+            self.addstr_safe(height - 1, 0, footer.ljust(width - 1), curses.A_REVERSE)
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key == -1:
+                continue
+            if key in (ord('q'), 27, curses.KEY_LEFT):
+                break
+            elif key == curses.KEY_DOWN:
+                offset += 1
+            elif key == curses.KEY_UP:
+                offset -= 1
+            elif key in (curses.KEY_NPAGE, ord(' ')):
+                offset += page
+            elif key in (curses.KEY_PPAGE, ord('b')):
+                offset -= page
+            elif key == curses.KEY_HOME:
+                offset = 0
+            elif key == curses.KEY_END:
+                offset = len(lines)
+            elif key in extra_keys:
+                action = extra_keys[key]()
+                if action == 'break':
+                    break
+                if action == 'reload':
+                    stale = True
+                if action == 'top':
+                    stale, offset = True, 0
+        self.last_height = 0
+
     def show_email_details(self):
         email = self.selected_sender['emails'][self.current_row]
-        height, width = self.stdscr.getmaxyx()
-        
-        self.stdscr.clear()
-        self.addstr_safe(0, 0, f"Subject: {email['subject']}", curses.A_BOLD)
-        self.addstr_safe(2, 0, f"From: {email['sender']}")
-        self.addstr_safe(3, 0, f"Date: {email['date']}")
-        if email.get('state'):
-            self.addstr_safe(4, 0, f"Queue state: {email['state']}")
-        self.addstr_safe(6, 0, "Press any key to return")
-        self.stdscr.refresh()
-        self.stdscr.timeout(-1)
-        self.stdscr.getch()
-        self.stdscr.timeout(200)
-        self.last_height = 0
+        if email.get('body') is None and not email.get('body_error'):
+            self.load_body(email)
+
+        def reload_body():
+            email['body'] = None
+            email['body_error'] = None
+            self.load_body(email)
+            return 'reload'
+
+        def queue_and_leave():
+            self.enqueue_current()
+            return 'break'
+
+        def open_thread():
+            self.show_thread(email['threadId'], focus_id=email['id'])
+            return 'reload'
+
+        self.scroll_view(
+            lambda width: build_reader_lines(email, width),
+            "q: Back | a: Queue archive | c: Whole thread | r: Reload | arrows/space: Scroll",
+            {ord('r'): reload_body, ord('a'): queue_and_leave, ord('c'): open_thread},
+        )
+
+    def current_thread_id(self):
+        if self.view_mode == 'emails':
+            return self.selected_sender['emails'][self.current_row]['threadId'], None
+        if not self.grouped_emails:
+            return None, "Nothing to open"
+        group = self.grouped_emails[self.current_row]
+        if self.group_mode == 'thread':
+            return group['sender_email'], None
+        thread_ids = {email['threadId'] for email in group['emails']}
+        if len(thread_ids) == 1:
+            return thread_ids.pop(), None
+        return None, "This sender has several threads - press t or Enter to pick one"
+
+    def show_current_thread(self):
+        thread_id, problem = self.current_thread_id()
+        if thread_id is None:
+            self.show_message(problem)
+            return
+        self.show_thread(thread_id)
+
+    def load_thread(self, thread_id):
+        self.show_loading("Loading conversation...")
+        messages, error = fetch_thread(self.service, thread_id)
+        self.thread_cache[thread_id] = (messages, error)
+        return messages, error
+
+    def show_thread(self, thread_id, focus_id=None):
+        if thread_id not in self.thread_cache:
+            self.load_thread(thread_id)
+        state = {'quotes': False}
+
+        def get_lines(width):
+            messages, error = self.thread_cache.get(thread_id, (None, None))
+            return build_thread_lines(messages, width, show_quotes=state['quotes'],
+                                      error=error, focus_id=focus_id)
+
+        def toggle_quotes():
+            state['quotes'] = not state['quotes']
+            return 'reload'
+
+        def reload_thread():
+            self.load_thread(thread_id)
+            return 'reload'
+
+        def queue_thread():
+            emails = [email for email in self.emails if email['threadId'] == thread_id]
+            if not emails:
+                self.show_message("No inbox message of this conversation is left to archive")
+                return None
+            messages, _ = self.thread_cache.get(thread_id, (None, None))
+            label = clean_subject(messages[0]['subject']) if messages else ''
+            self.enqueue_emails(emails, label or f"thread {thread_id}")
+            return 'break'
+
+        self.scroll_view(
+            get_lines,
+            "q: Back | h: Quoted text | a: Queue whole thread | r: Reload | arrows/space: Scroll",
+            {ord('h'): toggle_quotes, ord('r'): reload_thread, ord('a'): queue_thread},
+        )
 
 def inner_main(stdscr, creds):
     curses.use_default_colors()
