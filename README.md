@@ -10,7 +10,13 @@ NCeu is a command-line interface tool for managing and analyzing your Gmail inbo
 - Sort emails by count or date
 - View email details
 - Archive individual emails or all emails from a sender directly from the interface
-- Progress bar for archiving multiple emails
+- Background archive queue: pressing 'a' queues the row and the cursor moves on immediately, so you can
+  flag many senders in a row without ever waiting for the Gmail API
+- 5 second undo window: a queued task is only sent to Gmail after a short delay, so a mistaken 'a' can
+  still be taken back
+- Queue inspector with live countdown, per-task removal, and a stop/start switch
+- Failed tasks are shown in the interface (status line, row marker, queue view) and repeated on exit -
+  they are never silently dropped
 - ncurses-based UI for smooth navigation
 
 ## Prerequisites
@@ -72,12 +78,41 @@ On first run, you'll be prompted to authorize the application. Follow the provid
 
 ### Navigation
 
-- Use arrow keys to move up and down the list
+- Use arrow keys (and PgUp/PgDn) to move up and down the list
 - Press 'Enter' to view emails from a sender or email details
 - Press 's' to change sort order (in sender view)
-- Press 'a' to archive an email (in email view)
-- Press 'a' to archive all emails from a sender (in sender view) with a progress bar showing the status
+- Press 't' to switch between grouping by sender and by thread (in sender view)
+- Press 'a' to put the current row into the archive queue - a whole sender in sender view, a single
+  email in email view. The cursor moves down straight away, so 'a a a a' queues four rows.
+- Press 'u' to take the current row back out of the queue
+- Press 'v' to open the queue, 'p' to stop or restart it
 - Press 'q' to go back or quit the application
+
+### Archive queue
+
+Archiving never blocks the interface. Pressing 'a' only appends a task to a queue that a background
+worker drains one task at a time.
+
+- Each task waits `ARCHIVE_DELAY` (5 seconds by default) before it is sent to Gmail. Until then it can
+  be cancelled and nothing leaves the inbox.
+- The second line of the screen shows the queue state: whether it runs or is stopped, how many tasks
+  and emails are waiting, the countdown for the next one, how many emails were archived, and how many
+  tasks failed.
+- Rows are marked with their queue state: `Q` queued, `>` being archived, `-` archived, `!` failed.
+  The count column shows how many emails of that sender are still in the inbox.
+- In the queue view ('v'): arrow keys to move, 'd' to drop the selected task, 'c' to clear the queue,
+  'p' to stop or restart the worker, 'q' to go back. Failed tasks are listed at the bottom.
+- Quitting with a non-empty queue asks first: 'w' waits for the queue to drain, 'd' throws the pending
+  tasks away, 'c' returns to the list.
+
+## Tests
+
+```
+python3 -m pytest tests/
+```
+
+The suite drives the real queue worker against a fake Gmail service (delay, cancellation, stop/start,
+partial failures) and runs the real ncurses interface inside a pty.
 
 ## Contributing
 
